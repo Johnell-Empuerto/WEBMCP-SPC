@@ -71,12 +71,28 @@ INTENT_CRITERIA: Dict[str, str] = {
     "unknown": "request does not match any other intent",
 }
 
+# Canonical month numbers + the spellings people actually type: 3-letter
+# abbreviations ("feb", "jul") and common typos ("febuary").
 MONTH_NAMES: Dict[str, int] = {
-    "january": 1, "february": 2, "march": 3, "april": 4,
-    "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2, "febuary": 2, "febrary": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sept": 9, "sep": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
 }
-_MONTH_RE = "|".join(MONTH_NAMES)
+# Longest first so "february" wins over "feb" in the alternation.
+_MONTH_RE = "|".join(sorted(MONTH_NAMES, key=len, reverse=True))
+
+# Which DPR line the current page implies. A short command like
+# "load data from february" carries no line — the page supplies it.
+DPR_PAGE_LINES: Dict[str, str] = {"mpr-adc": "adc", "mpr-c4": "c4", "mpr-kd": "kd"}
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +286,15 @@ def _extract_entities(message: str, current_date: Optional[str]) -> Dict[str, An
     elif re.search(r"\b(?:all|every|everything)\b", text):
         model = "all"
     else:
-        model = "not_specified"
+        # Bare model without the keyword: "load ES01". Matches the
+        # chat-facing names (ES codes, hyphenated part codes); normalized to
+        # upper so the frontend resolveModel gets "ES01", not "es01".
+        bare = re.search(
+            r"\b(?:ES\s?\d{2}(?:\s+[HL]/R)?|\d(?:-\d+){2,})\b",
+            message,
+            re.IGNORECASE,
+        )
+        model = bare.group(0).replace(" ", "").upper() if bare else "not_specified"
 
     return {
         "date_hint": date_hint,
@@ -281,12 +305,21 @@ def _extract_entities(message: str, current_date: Optional[str]) -> Dict[str, An
     }
 
 
-def _correct_intent(message: str, predicted: str) -> str:
+def _correct_intent(
+    message: str,
+    predicted: str,
+    page: Optional[str] = None,
+    entities: Optional[Dict[str, Any]] = None,
+) -> str:
     """Apply deterministic NXPERT rules for obvious intent signals.
 
     Laya is a tiny classifier and blurs two known pairs (navigate vs
     dpr_search, dpr_actual vs ng_summary). When the message contains the
     deciding keyword, Python overrides the prediction.
+
+    `page`/`entities` make the decision context-aware: on a DPR page a short
+    command like "load data from febuary" is a dpr_search even without the
+    word "DPR" — the message supplies the filter, the page supplies the line.
     """
     text = message.lower()
 
@@ -317,13 +350,25 @@ def _correct_intent(message: str, predicted: str) -> str:
         )):
             return "ng_summary"
 
-    # Data-loading phrasing without the letters "dpr" ("Show April for all
-    # models") is still a DPR search — but never hijack plan/user/NG intents.
+    # Short data commands: a data verb plus a concrete filter the message
+    # actually carries (a date or a model, from the entity layer — the
+    # phrasing needn't mention "DPR" or spell the month correctly). On a DPR
+    # page even a bare "load data" counts — the page supplies the line.
+    ents = entities if entities is not None else {}
+    has_filter = (
+        ents.get("date_hint", "not_specified") != "not_specified"
+        or ents.get("model", "not_specified") != "not_specified"
+    )
+    bare_page_load = page in DPR_PAGE_LINES and re.search(
+        r"\b(?:data|models?|table|production|results?)\b", text
+    )
     if (
-        re.search(r"\b(?:show|load|display|get|fetch|pull|see|want|view)\b", text)
-        and re.search(rf"\b(?:{_MONTH_RE}|today|yesterday|tomorrow)\b|\d{{4}}-\d{{1,2}}-\d{{1,2}}", text)
-        and re.search(r"\b(?:model|models|everything)\b", text)
-        and not re.search(r"\b(?:ng|ppm|plan|user)\b", text)
+        re.search(
+            r"\b(?:load|show|display|fetch|get|pull|refresh|search|view|see|want)\b",
+            text,
+        )
+        and (has_filter or bare_page_load)
+        and not re.search(r"\b(?:ng|ppm|plan|user|actual)\b", text)
     ):
         return "dpr_search"
 
@@ -502,11 +547,21 @@ def _classify(state: IntentState) -> Dict[str, Any]:
 
     intent_answer = result.get("answers", {}).get("intent", {})
     predicted_intent = _choice(intent_answer, "unknown")
-    final_intent = _correct_intent(state.message, predicted_intent)
+    entities = _extract_entities(state.message, state.date)
+    final_intent = _correct_intent(state.message, predicted_intent, state.page, entities)
+
+    if final_intent == "dpr_search":
+        # Context: the current page supplies the line, and a load command
+        # that never mentions a model means ALL models (a fresh request —
+        # "load data from february" shouldn't keep an old ES01 filter).
+        if entities["line"] == "not_specified":
+            entities["line"] = DPR_PAGE_LINES.get(state.page or "", "not_specified")
+        if entities["model"] == "not_specified":
+            entities["model"] = "all"
 
     return {
         "intent": final_intent,
-        "entities": _extract_entities(state.message, state.date),
+        "entities": entities,
         "confidence": _confidence(intent_answer),
         "state": {"page": state.page, "filters": state.filters},
         "routing": result.get("routing", {}),

@@ -158,6 +158,65 @@ def main():
         except Exception as exc:  # noqa: BLE001
             print(f"[FAIL] read getNGSummary\n       ERROR: {exc}")
 
+    # 6. context-aware load: typo month, no "dpr"/line/model in the message —
+    #    the page supplies the line, entities supply the date, model defaults
+    #    to all; chain navigateToDPR -> setDPRFilters -> searchDPR
+    total += 1
+    steps, args_list, first_intent = [], [], None
+    executed = []
+    try:
+        for _ in range(3):
+            res = chat("load data from febuary", executed=executed, page="mpr-adc")
+            if first_intent is None:
+                first_intent = res.get("intent")
+            if not res["toolCalls"]:
+                break
+            tc = res["toolCalls"][0]
+            steps.append(tc["tool"])
+            args_list.append(tc.get("args", {}))
+            executed.append(tc["tool"])
+        ok = (
+            first_intent == "dpr_search"
+            and steps == ["navigateToDPR", "setDPRFilters", "searchDPR"]
+            and args_list[0].get("line") == "adc"
+            and args_list[1].get("date") == "2026-02-01"
+            and args_list[1].get("model") == "all"
+        )
+        print(f"[{'PASS' if ok else 'FAIL'}] load data from febuary (mpr-adc)")
+        print(f"       intent={first_intent} steps={steps}")
+        print(f"       args={args_list}")
+        passed += int(ok)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FAIL] load data from febuary (mpr-adc)\n       ERROR: {exc}")
+
+    # 6b. bare model code without the "model" keyword: "load ES01"
+    total += 1
+    steps, args_list, first_intent = [], [], None
+    executed = []
+    try:
+        for _ in range(3):
+            res = chat("load ES01", executed=executed, page="mpr-adc")
+            if first_intent is None:
+                first_intent = res.get("intent")
+            if not res["toolCalls"]:
+                break
+            tc = res["toolCalls"][0]
+            steps.append(tc["tool"])
+            args_list.append(tc.get("args", {}))
+            executed.append(tc["tool"])
+        ok = (
+            first_intent == "dpr_search"
+            and steps == ["navigateToDPR", "setDPRFilters", "searchDPR"]
+            and args_list[0].get("line") == "adc"
+            and args_list[1].get("model") == "ES01"
+        )
+        print(f"[{'PASS' if ok else 'FAIL'}] load ES01 (mpr-adc)")
+        print(f"       intent={first_intent} steps={steps}")
+        print(f"       args={args_list}")
+        passed += int(ok)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FAIL] load ES01 (mpr-adc)\n       ERROR: {exc}")
+
     print(f"\n{passed}/{total} passed")
 
 
