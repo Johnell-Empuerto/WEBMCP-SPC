@@ -42,6 +42,10 @@ Thumbs.db
 .turbo/
 coverage/
 
+# Client data / documentation
+docs/
+doc/
+
 # Misc
 *.tmp
 *.temp
