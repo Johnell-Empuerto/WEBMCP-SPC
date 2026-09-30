@@ -1,13 +1,20 @@
 # WEBMCP-SPC
 
-NXPERT EON — Enterprise Production Investigation & Monitoring platform for Isuzu.
+NXPERT EON — Enterprise Production Investigation & Monitoring platform.
 Modernization of the legacy manufacturing execution system (MES).
+
+## Clone
+
+```bash
+git clone https://github.com/Johnell-Empuerto/WEBMCP-SPC.git
+cd WEBMCP-SPC
+```
 
 Monorepo layout:
 
 ```
 WEBMCP-SPC/
-├── backend/                 # Express + TypeScript API
+├── backend/                 # Express + TypeScript API (:3002)
 │   ├── src/
 │   │   ├── config/          # env validation, SQL Server pool
 │   │   ├── controllers/     # request handlers
@@ -17,14 +24,33 @@ WEBMCP-SPC/
 │   │   ├── middleware/      # auth (JWT), validation, errors
 │   │   └── types/           # shared API/model types
 │   └── assets/templates/    # Excel upload templates
-└── frontend/                # React + TypeScript SPA
-    ├── src/
-    │   ├── api/             # axios client
-    │   ├── auth/            # AuthProvider, permissions
-    │   ├── components/      # layout, login, ui primitives
-    │   └── features/        # one folder per page/feature
-    └── public/              # logos, static assets
+├── frontend/                # React + TypeScript SPA (:5173)
+│   ├── src/
+│   │   ├── api/             # axios client
+│   │   ├── auth/            # AuthProvider, permissions
+│   │   ├── components/      # layout, login, ui primitives, MCP chat panel
+│   │   ├── features/        # one folder per page/feature
+│   │   └── webmcp/          # tool registry, /chat client, executor
+│   └── public/              # logos, static assets
+└── laya-server/             # Laya intent + chat orchestrator, FastAPI (:9000)
+    ├── server.py            # POST /predict, /intent, /chat
+    ├── orchestrator.py      # tool chain, clarify state
+    ├── qwen.py              # Qwen tool-selection client (:9001)
+    ├── tools.py             # registry mirror + validation
+    └── test_*.py            # choose / qwen / chat smoke tests
 ```
+
+## What You Need to Download
+
+| Tool | Version | Used for |
+| ---- | ------- | -------- |
+| [Git](https://git-scm.com/downloads) | any recent | cloning the repo |
+| [Node.js](https://nodejs.org/) | 20+ (npm 10+) | frontend + backend |
+| [Python](https://www.python.org/downloads/) | 3.10+ | laya-server (FastAPI) |
+| pip packages | — | `pip install fastapi uvicorn pydantic` plus the `laya` NLU package (imported by `laya-server/server.py`) |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | recent | `llama-server` hosting the tool-selection model |
+| Qwen3-0.6B (GGUF) | ~0.6B | the model `llama-server` serves on `:9001` |
+| Microsoft SQL Server | any | application database (default host: `iot-server`) |
 
 ## Technology Stack
 
@@ -35,11 +61,13 @@ WEBMCP-SPC/
 | Backend  | Express 4, TypeScript, Zod, Helmet, rate limiting               |
 | Database | Microsoft SQL Server (mssql)                                   |
 | Auth     | JWT access + refresh tokens, bcrypt                            |
+| AI       | Laya intent router (Python/FastAPI), Qwen3-0.6B via llama-server |
 | Tooling  | tsx (dev), ESLint (backend), oxlint (frontend)                 |
 
 ## Features
 
 - **Authentication & authorization** — JWT login, role-based permissions, session timeout
+- **NXPERT MCP chat assistant** — right-side chat panel that drives the app: page navigation, DPR filters, data loading (`navigateToDPR` → `setDPRFilters` → `searchDPR`), with a Guide page at `/mcp-guide`
 - **Production management** — production calendar and details
 - **Plan uploader** — Excel plan upload with validation log and preview
 - **DPR** (Daily Production Report) — ADC / C4 / KD lines + DPR master
@@ -52,13 +80,21 @@ WEBMCP-SPC/
 
 ## Prerequisites
 
-- Node.js 20+
-- npm 10+
+- Git, Node.js 20+, npm 10+
+- Python 3.10+ (FastAPI, uvicorn, pydantic, the `laya` package)
+- llama.cpp `llama-server` + a Qwen3-0.6B GGUF model
 - Microsoft SQL Server (default host: `iot-server`)
 
 ## Getting Started
 
-### 1. Backend
+### 1. Clone
+
+```bash
+git clone https://github.com/Johnell-Empuerto/WEBMCP-SPC.git
+cd WEBMCP-SPC
+```
+
+### 2. Backend
 
 ```bash
 cd backend
@@ -67,7 +103,7 @@ copy .env.example .env     # then fill DB_PASSWORD and JWT_SECRET
 npm run dev                # http://localhost:3002
 ```
 
-### 2. Frontend
+### 3. Frontend
 
 ```bash
 cd frontend
@@ -75,7 +111,44 @@ npm install
 npm run dev                # http://localhost:5173
 ```
 
-The Vite dev server proxies `/api` to `http://localhost:3002` (see `frontend/vite.config.ts`).
+### 4. Laya server (intent + chat orchestrator)
+
+```bash
+cd laya-server
+python server.py           # http://127.0.0.1:9000
+```
+
+### 5. Qwen tool selector (llama-server)
+
+```bash
+llama-server -m <qwen3-0.6b.gguf> --port 9001
+```
+
+The frontend Vite dev server proxies traffic (see `frontend/vite.config.ts`):
+
+| Prefix      | Target                     | Notes                          |
+| ----------- | -------------------------- | ------------------------------ |
+| `/api`      | `http://localhost:3002`    | Express API                    |
+| `/laya-api` | `http://localhost:9000`    | prefix stripped (`/laya-api/chat` → `/chat`) |
+
+Ports at a glance:
+
+| Service            | Port | Start command                     |
+| ------------------ | ---- | --------------------------------- |
+| Frontend (Vite)    | 5173 | `npm run dev` in `frontend/`      |
+| Backend (Express)  | 3002 | `npm run dev` in `backend/`       |
+| Laya (FastAPI)     | 9000 | `python server.py` in `laya-server/` |
+| Qwen (llama-server)| 9001 | `llama-server -m … --port 9001`   |
+
+The chat degrades gracefully: `/intent` and the UI work without llama-server; tool selection (`/chat`) needs it.
+
+### Smoke tests (laya-server)
+
+```bash
+python test_choose.py    # registry/validate_choice
+python test_qwen.py      # Qwen tool selection (needs :9001)
+python test_chat.py      # full /chat chain (needs :9000 + :9001)
+```
 
 ## Environment Variables
 
@@ -106,6 +179,15 @@ The Vite dev server proxies `/api` to `http://localhost:3002` (see `frontend/vit
 | ------------------- | ------- | ------------------------------- |
 | `VITE_API_BASE_URL` | `/api`  | API base URL (proxied via Vite) |
 
+### Laya server (`laya-server/`)
+
+| Variable       | Default                        | Description                       |
+| -------------- | ------------------------------ | --------------------------------- |
+| `QWEN_URL`     | `http://127.0.0.1:9001/v1/chat/completions` | Tool-selection endpoint |
+| `QWEN_MODEL`   | `qwen3-0.6b`                   | Model name sent to llama-server   |
+| `QWEN_TIMEOUT` | `60`                           | Seconds before a tool call fails  |
+| `LAYA_PRELOAD` | `0`                            | `1` builds intent checkpoints at startup |
+
 ## Scripts
 
 | Command                       | Description                      |
@@ -117,6 +199,8 @@ The Vite dev server proxies `/api` to `http://localhost:3002` (see `frontend/vit
 | `npm run dev` (frontend)      | Vite dev server                  |
 | `npm run build` (frontend)    | Type-check + Vite build          |
 | `npm run lint` (frontend)     | oxlint                           |
+| `python server.py` (laya)     | Intent + chat API on :9000       |
+| `python test_chat.py` (laya)  | Chat pipeline smoke test         |
 
 ## API Overview
 
@@ -133,6 +217,8 @@ The API uses **three response envelopes** (each module family is internally cons
 | C        | `{ success, data }`                                                                     | mpr-adc/c4/kd, production-management, production-charts                       |
 
 Security: Helmet, CORS (environment-driven, never `*` in production), global rate limiting on `/api/`, Zod validation, JWT middleware on protected routes.
+
+Laya server exposes: `POST /predict`, `POST /intent`, `POST /chat`, plus `GET /qtypes`, `/models`, `/health`.
 
 ## Documentation
 

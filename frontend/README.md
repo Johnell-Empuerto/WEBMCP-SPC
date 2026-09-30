@@ -6,7 +6,7 @@ Modernization of the legacy manufacturing execution system.
 ## Repository Structure
 
 ```
-isuzu-nxpert-eon/
+WEBMCP-SPC/
 ├── eon_frontend/          # React + TypeScript + Vite frontend
 ├── eon_backend/           # Express + TypeScript backend
 ├── docs/                  # Project documentation
