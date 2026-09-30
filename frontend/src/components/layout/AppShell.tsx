@@ -13,6 +13,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Timer } from "lucide-react";
+import ChatAssistant from "@/components/chat/ChatAssistant";
 import { useSessionTimeout } from "@/hooks/useSessionTimeout";
 import { cn } from "@/lib/utils";
 
@@ -85,6 +86,9 @@ export default function AppShell() {
           onClick={closeSidebar}
         />
       </div>
+
+      {/* Floating chat assistant (UI only) */}
+      <ChatAssistant />
 
       {/* Idle session warning — shown ~1 minute before timeout */}
       <Dialog open={showWarning} onOpenChange={(open) => !open && continueSession()}>

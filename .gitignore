@@ -49,3 +49,14 @@ doc/
 # Misc
 *.tmp
 *.temp
+
+# Local LLM models
+*.gguf
+
+# Or specifically
+LLM/model/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

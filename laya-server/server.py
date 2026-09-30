@@ -6,6 +6,7 @@ Run:
 
 Endpoints (the contract the web UI expects):
     POST /predict   answer every question about one state
+    POST /intent    NXPERT chat: typed intent + entities for a user message
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional, Union
@@ -38,6 +40,32 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 
 MODELS = tuple(getattr(laya, "DEFAULT_MODELS", {}) or ("english", "multilingual", "typed-decisions"))
 QTYPES = sorted(getattr(laya, "QTYPES", {}) or ("choice", "score", "noul"))
+
+
+# --------------------------------------------------------------------------- #
+# NXPERT intent taxonomy (single source for the /intent endpoint)
+# --------------------------------------------------------------------------- #
+
+# NOTE: Laya's job here is ONLY intent classification. Simple entities
+# (date/line/shift) are extracted deterministically by Python in
+# `_extract_entities` — a tiny classifier guesses those, Python never does.
+
+INTENT_CRITERIA: Dict[str, str] = {
+    "dpr_actual": "ask how many units were actually produced or actual production output",
+    "dpr_plan": "ask for planned production quantity",
+    "dpr_search": "search or load DPR data, or set DPR filters such as model, date, line, or shift",
+    "mpr_summary": "ask for monthly production summary",
+    "ng_summary": "ask about NG defects, NG quantity, NG count, or which model has the most NG",
+    "ng_trend": "ask about NG defects over time or NG history",
+    "production_status": "ask for production status or compare plan versus actual",
+    "add_plan": "create or add a production plan",
+    "create_user": "create a new user",
+    "update_user": "edit an existing user",
+    "ppm_status": "ask about PPM defect rate or PPM status",
+    "navigate": "only go to or open a page; do not search, load, filter, retrieve, or change data",
+    "greeting": "greeting, thanks, or asking what you can do",
+    "unknown": "request does not match any other intent",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -100,6 +128,129 @@ class PredictRequest(BaseModel):
         if not v:
             raise ValueError("state must not be empty")
         return v
+
+
+class IntentState(BaseModel):
+    """What the frontend knows right now + the user's message."""
+
+    page: Optional[str] = Field(default=None, description="Current NXPERT page/route, e.g. 'dpr-adc'")
+    date: Optional[str] = Field(default=None, description="Date currently selected on the page (YYYY-MM-DD)")
+    filters: Dict[str, Any] = Field(default_factory=dict, description="Filters currently applied on the page")
+    message: str = Field(..., min_length=1, max_length=2000, description="User chat message")
+
+    @field_validator("message")
+    @classmethod
+    def _strip_message(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("message must not be blank")
+        return v
+
+
+class IntentRequest(BaseModel):
+    state: IntentState
+
+
+def _intent_questions() -> Dict[str, Any]:
+    """The typed intent question answered by Laya."""
+    return {
+        "intent": {
+            "type": "choice",
+            "instructions": "The user's main request in the NXPERT manufacturing system",
+            "criteria": INTENT_CRITERIA,
+        },
+    }
+
+
+def _extract_entities(message: str, current_date: Optional[str]) -> Dict[str, Any]:
+    """Extract simple entities deterministically from the user's message.
+
+    Laya is a tiny classifier — it guesses when an entity is absent. Dates,
+    lines and shifts are exact string matches, so Python does them instead.
+    """
+    text = message.lower()
+
+    # Date
+    if re.search(r"\btoday\b", text):
+        date_hint = "today"
+    elif re.search(r"\byesterday\b", text):
+        date_hint = "yesterday"
+    elif re.search(r"\btomorrow\b", text):
+        date_hint = "tomorrow"
+    elif re.search(
+        r"\b\d{4}-\d{1,2}-\d{1,2}\b"
+        r"|\b(?:january|february|march|april|may|june|july|august|"
+        r"september|october|november|december)\s+\d{1,2}(?:,\s*\d{4})?\b",
+        text,
+    ):
+        date_hint = "explicit"
+    else:
+        date_hint = "not_specified"
+
+    # Production line
+    if re.search(r"\badc\b", text):
+        line = "adc"
+    elif re.search(r"\bc4\b", text):
+        line = "c4"
+    elif re.search(r"\bkd\b", text):
+        line = "kd"
+    else:
+        line = "not_specified"
+
+    # Shift
+    if re.search(r"\b(?:shift\s*1|first\s+shift|1st\s+shift)\b", text):
+        shift = "1"
+    elif re.search(r"\b(?:shift\s*2|second\s+shift|2nd\s+shift)\b", text):
+        shift = "2"
+    elif re.search(r"\b(?:shift\s*3|third\s+shift|3rd\s+shift)\b", text):
+        shift = "3"
+    else:
+        shift = "not_specified"
+
+    return {
+        "date_hint": date_hint,
+        "date": current_date,
+        "line": line,
+        "shift": shift,
+    }
+
+
+def _correct_intent(message: str, predicted: str) -> str:
+    """Apply deterministic NXPERT rules for obvious intent signals.
+
+    Laya is a tiny classifier and blurs two known pairs (navigate vs
+    dpr_search, dpr_actual vs ng_summary). When the message contains the
+    deciding keyword, Python overrides the prediction.
+    """
+    text = message.lower()
+
+    # DPR search/filter/load takes priority over simple navigation.
+    if "dpr" in text:
+        if any(word in text for word in (
+            "set",
+            "filter",
+            "load",
+            "search",
+            "model",
+            "date",
+            "line",
+            "shift",
+        )):
+            return "dpr_search"
+
+    # NG summary: current NG quantity/count or model with most NG.
+    if "ng" in text:
+        if any(phrase in text for phrase in (
+            "most ng",
+            "highest ng",
+            "more ng",
+            "ng count",
+            "ng quantity",
+            "ng defects",
+        )):
+            return "ng_summary"
+
+    return predicted
 
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +360,67 @@ def predict(req: PredictRequest, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="prediction failed")
 
 
+def _choice(answer: Dict[str, Any], default: str) -> str:
+    """Extract the chosen label + calibrated probability from a Laya answer."""
+    return str(answer.get("choice") or default)
+
+
+def _confidence(answer: Dict[str, Any]) -> Optional[float]:
+    value = answer.get("answer_confidence")
+    if value is None:
+        value = answer.get("confidence")
+    if value is None:
+        return None
+    try:
+        return round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+@app.post("/intent")
+def intent(req: IntentRequest) -> Dict[str, Any]:
+    """NXPERT chat entry point: user message + page state → typed intent/entities.
+
+    Laya answers the intent question in one forward pass; simple entities
+    (date/line/shift) are extracted deterministically by Python. The caller
+    (orchestrator) feeds `intent` + `entities` to Qwen for tool selection.
+    """
+    state = req.state
+    # Laya reads plain text best; page/filters are context for the response,
+    # not tokens it must parse, so only the message becomes the state text.
+    try:
+        result = _router().predict(
+            state.message, _intent_questions(), head_max_len=512
+        )
+    except HTTPException:
+        raise
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        _log.exception("intent prediction failed")
+        raise HTTPException(status_code=500, detail="prediction failed")
+
+    intent_answer = result.get("answers", {}).get("intent", {})
+
+    predicted_intent = _choice(intent_answer, "unknown")
+
+    final_intent = _correct_intent(
+        state.message,
+        predicted_intent,
+    )
+
+    return {
+        "intent": final_intent,
+        "entities": _extract_entities(state.message, state.date),
+        "confidence": _confidence(intent_answer),
+        "state": {
+            "page": state.page,
+            "filters": state.filters,
+        },
+        "routing": result.get("routing", {}),
+    }
+
+
 @app.exception_handler(404)
 async def _not_found(request: Request, exc: Exception):
     from fastapi.responses import JSONResponse
@@ -216,7 +428,7 @@ async def _not_found(request: Request, exc: Exception):
     return JSONResponse(
         status_code=404,
         content={"detail": "not found",
-                "routes": ["/predict", "/qtypes", "/models", "/health"]},
+                "routes": ["/predict", "/intent", "/qtypes", "/models", "/health"]},
     )
 
 
