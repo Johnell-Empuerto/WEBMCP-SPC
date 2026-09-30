@@ -1,0 +1,24 @@
+import { Router } from 'express';
+import * as ctrl from '../controllers/shiftMasterController';
+import { authenticate } from '../middleware/auth';
+
+// ════════════════════════════════════════════════════════════════════════════
+// Route layer for Shift Master.
+// Defines the API endpoints only — no SQL, no business logic, no validation.
+//   Route      → Controller (shiftMasterController.ts, HTTP concerns)
+//   Controller → Service    (shiftMasterService.ts, business logic)
+//   Service    → Repository (shiftMasterRepository.ts, SQL Server access)
+// ════════════════════════════════════════════════════════════════════════════
+
+const router = Router();
+
+// All endpoints require authentication (Bearer JWT, see middleware/auth.ts).
+router.use(authenticate);
+
+router.get('/', ctrl.listRecords);
+router.get('/check', ctrl.checkCode);
+router.post('/', ctrl.addRecord);
+router.put('/', ctrl.updateRecord);
+router.delete('/', ctrl.deleteRecord);
+
+export default router;

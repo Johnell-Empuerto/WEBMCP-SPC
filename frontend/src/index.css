@@ -1,0 +1,136 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+@plugin "tailwindcss-animate";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+  --color-background: #ffffff;
+  --color-foreground: #0f172a;
+  --color-card: #ffffff;
+  --color-card-foreground: #0f172a;
+  --color-primary: #005b96;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #0c738d;
+  --color-secondary-foreground: #ffffff;
+  --color-muted: #f1f5f9;
+  --color-muted-foreground: #64748b;
+  --color-accent: #e8f4f8;
+  --color-accent-foreground: #005b96;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e2e8f0;
+  --color-input: #e2e8f0;
+  --color-ring: #005b96;
+  --radius: 0.625rem;
+  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+  --shadow-card-hover: 0 4px 12px -2px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.06);
+  --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.08), 0 2px 4px rgb(0 0 0 / 0.04);
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-primary) 20%, transparent);
+  }
+}
+
+@keyframes animate-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: animate-in 0.2s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-in-from-top-1 {
+  from { transform: translateY(-4px); }
+  to { transform: translateY(0); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.animate-in.fade-in { animation-name: fade-in; }
+.animate-in.slide-in-from-top-1 { animation-name: slide-in-from-top-1; }
+
+/* ═══ Premium thin scrollbars (MPR tables) ═══════════════════════════════ */
+/* Lightweight, unobtrusive — 8px, rounded thumb, transparent track. */
+.mpr-scroll::-webkit-scrollbar,
+.ng-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.mpr-scroll::-webkit-scrollbar-track,
+.ng-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mpr-scroll::-webkit-scrollbar-thumb,
+.ng-scroll::-webkit-scrollbar-thumb {
+  background: rgb(100 116 139 / 0.35);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: background-color 150ms ease;
+}
+
+.mpr-scroll::-webkit-scrollbar-thumb:hover,
+.ng-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(100 116 139 / 0.6);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.mpr-scroll,
+.ng-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(100 116 139 / 0.35) transparent;
+}
+
+.mpr-scroll {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ═══ Login page — hide native browser password reveal ═══════════════════ */
+/* Edge/IE inject their own eye icon (::-ms-reveal) into password fields,
+   which duplicates the custom visibility toggle on the login form. */
+input.login-password-field::-ms-reveal,
+input.login-password-field::-ms-clear {
+  display: none;
+}
