@@ -6,12 +6,11 @@ import {
   Sparkles,
   X,
   MessageCircle,
-  Paperclip,
   User,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useChatContext } from "@/webmcp/context";
+import { useChatContext, isPendingAction, type PendingAction } from "@/webmcp/context";
 import { fetchChat } from "@/webmcp/chat";
 import {
   executeToolCall,
@@ -33,18 +32,16 @@ const INITIAL_MESSAGES: ChatMessage[] = [
   },
 ];
 
-const QUICK_REPLIES = [
-  "Today's production",
-  "Plan vs actual",
-  "DPR summary",
-  "NG report",
-];
-
 export default function ChatAssistant() {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // Clarify state from the last reply (e.g. {tool:"navigateToDPR",
+  // missing:"line"}); sent back with the NEXT message so the server can
+  // resolve it as the missing tool argument. One-shot: cleared on send and
+  // re-set only if the server asks again.
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const navigate = useNavigate();
   const ctx = useChatContext();
 
@@ -70,18 +67,29 @@ export default function ChatAssistant() {
     ]);
     setBusy(true);
     try {
+      // One-shot conversation state: the pending clarify applies to this
+      // message only (the response may re-ask with a fresh one).
+      const sendCtx = { ...ctx, pendingAction };
+      setPendingAction(null);
+
       // Chain: /chat → run pending ui tools → /chat with executed=[...] …
       // (orchestrator caps the chain at 3 steps server-side).
       const executed: string[] = [];
       for (let round = 0; round < 3; round++) {
-        const res = await fetchChat(text, ctx, executed);
+        const res = await fetchChat(text, sendCtx, executed);
         if (res.reply) pushBot(res.reply);
 
-        const pending = res.toolCalls.filter((t) => t.status === "pending");
-        if (pending.length === 0) break;
+        const clarifyTc = res.toolCalls.find((t) => t.status === "clarify");
+        if (clarifyTc) {
+          const pa = clarifyTc.args.pendingAction;
+          if (isPendingAction(pa)) setPendingAction(pa);
+        }
+
+        const pendingCalls = res.toolCalls.filter((t) => t.status === "pending");
+        if (pendingCalls.length === 0) break;
 
         let progressed = false;
-        for (const tc of pending) {
+        for (const tc of pendingCalls) {
           const result = await executeToolCall(tc.tool, tc.args);
           if (result.status === "done") {
             executed.push(tc.tool);
@@ -195,33 +203,11 @@ export default function ChatAssistant() {
             )}
           </div>
 
-          {/* Quick replies */}
-          <div className="flex flex-wrap gap-2 border-t bg-background px-4 py-3">
-            {QUICK_REPLIES.map((q) => (
-              <button
-                key={q}
-                type="button"
-                disabled={busy}
-                onClick={() => void send(q)}
-                className="rounded-full border border-primary/30 bg-accent px-3 py-1.5 text-xs font-medium text-accent-foreground transition-colors hover:bg-primary hover:text-primary-foreground disabled:opacity-50"
-              >
-                {q}
-              </button>
-            ))}
-          </div>
-
           {/* Input */}
           <form
             onSubmit={handleSubmit}
             className="flex items-center gap-2 border-t bg-background px-3 py-3"
           >
-            <button
-              type="button"
-              aria-label="Attach file"
-              className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <Paperclip className="h-4.5 w-4.5" />
-            </button>
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
