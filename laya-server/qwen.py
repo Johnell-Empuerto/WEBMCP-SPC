@@ -85,7 +85,7 @@ already_done=["navigateToDPR","setDPRFilters","searchDPR"]
 -> {{"tool":"none","args":{{}}}}
 
 Arguments:
-- navigateToDPR normally uses {{}}
+- navigateToDPR uses {{"line":"adc"|"c4"|"kd"}} when the entities include a line, otherwise {{}}
 - setDPRFilters uses the relevant Laya entities.
 - searchDPR uses only the arguments required by its registry schema.
 - Omit optional arguments that are not specified.

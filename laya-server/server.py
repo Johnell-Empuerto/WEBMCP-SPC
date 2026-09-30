@@ -147,6 +147,12 @@ class IntentState(BaseModel):
     page: Optional[str] = Field(default=None, description="Current NXPERT page/route, e.g. 'dpr-adc'")
     date: Optional[str] = Field(default=None, description="Date currently selected on the page (YYYY-MM-DD)")
     filters: Dict[str, Any] = Field(default_factory=dict, description="Filters currently applied on the page")
+    pendingAction: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Clarify state from the previous turn "
+                    "(toolCalls[].args.pendingAction), e.g. "
+                    "{'tool': 'navigateToDPR', 'missing': 'line'}",
+    )
     message: str = Field(..., min_length=1, max_length=2000, description="User chat message")
 
     @field_validator("message")
@@ -321,18 +327,34 @@ def _correct_intent(message: str, predicted: str) -> str:
     ):
         return "dpr_search"
 
-    # Pure page navigation: opening verbs + a known page keyword, with no
-    # data action (the dpr_search rules above already claimed those).
-    if re.search(r"\b(?:open|show|go\s+to|goto|take\s+me\s+to|navigate\s+to|display)\b", text):
-        if re.search(r"\b(?:dpr|drp|mpr|dashboard|calendar|logs|settings|ng\s+report|plan\s+uploader)\b", text):
-            # Stay on data intents ("show dpr plan"), but the page names
-            # "ng report" / "plan uploader" are navigation despite the words.
-            if not re.search(
-                r"\b(?:plan(?!\s+uploader)|actual|production|quantity|output"
-                r"|units?|ng(?!\s+report)|ppm)\b",
-                text,
-            ):
-                return "navigate"
+    # Pure page navigation: an opening verb + a known page keyword, or a bare
+    # "dpr c4" phrase, with no data action (the dpr_search rules above already
+    # claimed those).
+    verb = re.search(
+        r"\b(?:open|show|go\s+to|goto|take\s+me\s+to|navigate\s+to|display)\b", text
+    )
+    page_kw = re.search(
+        r"\b(?:dpr|drp|mpr|dashboard|calendar|logs|settings|ng\s+report|plan\s+uploader)\b",
+        text,
+    )
+    bare_dpr_line = (
+        ("dpr" in text or "drp" in text) and re.search(r"\b(?:adc|c4|kd)\b", text)
+    )
+    if (verb or bare_dpr_line) and page_kw:
+        # Stay on data intents ("show dpr plan"), but the page names
+        # "ng report" / "plan uploader" are navigation despite the words.
+        if not re.search(
+            r"\b(?:plan(?!\s+uploader)|actual|production|quantity|output"
+            r"|units?|ng(?!\s+report)|ppm)\b",
+            text,
+        ):
+            return "navigate"
+
+    # A cold "navigate" prediction must carry a navigational signal — a bare
+    # answer like "c4" is not a command on its own (it only counts while a
+    # pendingAction is waiting for it, which run_chat resolves separately).
+    if predicted == "navigate" and not (verb or bare_dpr_line or page_kw):
+        return "unknown"
 
     return predicted
 
@@ -528,6 +550,7 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(None)) -> Dict[
         date=req.state.date,
         executed=req.executed,
         jwt=authorization,
+        pending_action=req.state.pendingAction,
     )
 
 

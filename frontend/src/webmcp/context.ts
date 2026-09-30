@@ -9,6 +9,29 @@ import { useLocation } from "react-router-dom";
  * Qwen for tool selection.
  */
 
+/**
+ * Pending clarification state: what the assistant still needs before it can
+ * run a tool. Small on purpose — just the tool and the missing field, e.g.
+ * after "Which DPR do you want to open, ADC or C4?" the next message is the
+ * missing `line` value. Cleared as soon as it is answered (one-shot).
+ */
+export interface PendingAction {
+  tool: "navigateToDPR";
+  missing: "line";
+  /** Future: resume payload (e.g. a paused dpr_search) after the answer. */
+  [key: string]: unknown;
+}
+
+/** Type guard for `toolCalls[].args.pendingAction` coming back from /chat. */
+export function isPendingAction(v: unknown): v is PendingAction {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof (v as { tool?: unknown }).tool === "string" &&
+    typeof (v as { missing?: unknown }).missing === "string"
+  );
+}
+
 export interface ChatPageState {
   /** Current route without leading slash, e.g. "dpr-adc", "plan-uploader". */
   page: string;
@@ -16,6 +39,13 @@ export interface ChatPageState {
   date: string;
   /** Filters currently applied on the page (wired per-page in Step 5). */
   filters: Record<string, string>;
+  /**
+   * Clarify state from the previous assistant turn
+   * (toolCalls[].args.pendingAction) — sent back with the NEXT message so
+   * the server can resolve it as the missing tool argument instead of
+   * classifying the answer as a brand-new request.
+   */
+  pendingAction?: PendingAction | null;
 }
 
 export interface IntentEntities {

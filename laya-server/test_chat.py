@@ -20,9 +20,12 @@ CHAT_URL = os.getenv("LAYA_CHAT_URL", "http://127.0.0.1:9000/chat")
 TODAY = "2026-10-03"
 
 
-def chat(message: str, executed=None, page: str = "home"):
+def chat(message: str, executed=None, page: str = "home", pending_action: dict = None):
+    state = {"page": page, "date": TODAY, "filters": {}, "message": message}
+    if pending_action:
+        state["pendingAction"] = pending_action
     body = {
-        "state": {"page": page, "date": TODAY, "filters": {}, "message": message},
+        "state": state,
         "executed": executed or [],
     }
     headers = {"Content-Type": "application/json"}
@@ -58,9 +61,58 @@ def main():
     total += 1
     passed += show("greeting", chat("hi"), expect_reply_only=True)
 
-    # 2. navigate -> pending ui tool
+    # 2. navigate without a line -> deterministic clarify carrying pending
+    #    action {tool: navigateToDPR, missing: line}; the browser echoes it
+    #    as state.pendingAction on the next message
     total += 1
-    passed += show("Go to DPR", chat("Go to DPR."), expect_tool="navigateToDPR")
+    res = chat("Go to DPR.")
+    tools = [f"{t['tool']}({t['status']})" for t in res.get("toolCalls", [])]
+    first_args = (res.get("toolCalls") or [{}])[0].get("args", {})
+    ok = (
+        res.get("reply") == "Which DPR do you want to open, ADC or C4?"
+        and tools == ["clarify(clarify)"]
+        and first_args.get("pendingAction")
+        == {"tool": "navigateToDPR", "missing": "line"}
+    )
+    print(f"[{'PASS' if ok else 'FAIL'}] go to dpr -> clarify (pendingAction)")
+    print(f"       tools={tools} reply={(res.get('reply') or '')[:70]!r}")
+    passed += int(ok)
+
+    # 2b. the bare answer resolves the state deterministically (no second
+    #     LLM call) -> navigateToDPR {line: c4}
+    total += 1
+    res = chat(
+        "C4",
+        pending_action={"tool": "navigateToDPR", "missing": "line"},
+    )
+    tc = res.get("toolCalls", [{}])[0]
+    ok = (
+        tc.get("tool") == "navigateToDPR"
+        and tc.get("args", {}).get("line") == "c4"
+        and tc.get("status") == "pending"
+        and res.get("reply") == "Opening the DPR C4 page."
+    )
+    print(f"[{'PASS' if ok else 'FAIL'}] answer C4 (pendingAction) -> navigateToDPR line c4")
+    print(f"       intent={res.get('intent')} tools={tc.get('tool')} args={tc.get('args')}")
+    passed += int(ok)
+
+    # 2c. explicit line needs no clarification
+    total += 1
+    res = chat("go to dpr adc")
+    tc = res.get("toolCalls", [{}])[0]
+    ok = tc.get("tool") == "navigateToDPR" and tc.get("args", {}).get("line") == "adc"
+    print(f"[{'PASS' if ok else 'FAIL'}] go to dpr adc -> navigateToDPR line adc")
+    print(f"       tools={tc.get('tool')} args={tc.get('args')}")
+    passed += int(ok)
+
+    # 2d. bare phrase, no verb: "dpr c4"
+    total += 1
+    res = chat("dpr c4")
+    tc = res.get("toolCalls", [{}])[0]
+    ok = tc.get("tool") == "navigateToDPR" and tc.get("args", {}).get("line") == "c4"
+    print(f"[{'PASS' if ok else 'FAIL'}] dpr c4 -> navigateToDPR line c4")
+    print(f"       tools={tc.get('tool')} args={tc.get('args')}")
+    passed += int(ok)
 
     # 3. chain: dpr_search -> navigateToDPR, then setDPRFilters, then searchDPR
     total += 1

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +39,26 @@ UI_REPLIES = {
 }
 
 CLARIFY_FALLBACK = "Could you tell me a bit more about what you need?"
+
+# Deterministic clarify: DPR navigation needs a line (ADC or C4). The pending
+# action travels back in `toolCalls[].args.pendingAction`; the browser echoes
+# it as `state.pendingAction` on the next message, where the answer ("c4")
+# resolves it as the missing argument — a state lookup, not a new request
+# (no Laya/Qwen call needed for the answer itself).
+DPR_LINE_PENDING_ACTION: Dict[str, str] = {"tool": "navigateToDPR", "missing": "line"}
+DPR_LINE_QUESTION = "Which DPR do you want to open, ADC or C4?"
+
+
+def _clarify_dpr_line(response: Dict[str, Any]) -> Dict[str, Any]:
+    response["reply"] = DPR_LINE_QUESTION
+    response["toolCalls"].append(
+        {
+            "tool": "clarify",
+            "args": {"pendingAction": dict(DPR_LINE_PENDING_ACTION)},
+            "status": "clarify",
+        }
+    )
+    return response
 
 ANSWER_SYSTEM = (
     "You are the NXPERT manufacturing assistant. Answer the user in 1-3 short "
@@ -149,8 +170,17 @@ def run_chat(
     date: Optional[str],
     executed: List[str],
     jwt: Optional[str],
+    pending_action: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Full Step-4 pipeline. Returns the /chat response body."""
+    """Full Step-4 pipeline. Returns the /chat response body.
+
+    `pending_action` is the clarify state from the previous turn (browser
+    echoes `toolCalls[].args.pendingAction` as `state.pendingAction`). When the
+    current message is the answer to that question, it is resolved
+    deterministically — "c4" becomes {line: "c4"} with no Laya/Qwen call —
+    and the state is consumed (the browser only re-sends it when the server
+    asks again).
+    """
     response: Dict[str, Any] = {
         "intent": intent,
         "entities": entities,
@@ -160,6 +190,65 @@ def run_chat(
         "toolCalls": [],
     }
 
+    line = str(entities.get("line") or "not_specified")
+
+    # ── conversational state: answering the "which DPR?" question ──────────
+    awaiting_line = (
+        isinstance(pending_action, dict)
+        and pending_action.get("tool") == "navigateToDPR"
+        and pending_action.get("missing") == "line"
+    )
+    if awaiting_line:
+        if line != "not_specified":
+            # "c4" IS the missing argument. Short answers resolve even if
+            # Laya classified the bare token cold; longer messages with a
+            # data intent are a new request (fall through, state consumed).
+            short_answer = re.fullmatch(
+                r"\s*(?:the\s+)?(?:dpr\s+)?(?:adc|c4|kd)(?:\s+page)?"
+                r"[.!?]?\s*(?:please)?\s*",
+                message,
+                re.IGNORECASE,
+            )
+            if short_answer or intent in ("unknown", "navigate"):
+                # Deterministic — no LLM call needed for this particular case.
+                response["intent"] = "navigate"
+                nav_args = {"line": line}
+                if "navigateToDPR" in executed:
+                    # Chain round: already opened, finish quietly.
+                    response["toolCalls"].append(
+                        {"tool": "navigateToDPR", "args": nav_args, "status": "done"}
+                    )
+                    return response
+                response["reply"] = f"Opening the DPR {line.upper()} page."
+                response["toolCalls"].append(
+                    {"tool": "navigateToDPR", "args": nav_args, "status": "pending"}
+                )
+                return response
+            # Data intent with a line → fresh request; pendingAction consumed.
+        elif intent in ("unknown", "navigate"):
+            return _clarify_dpr_line(response)  # still no line — ask again
+        # any other intent = user moved on; fall through unchanged
+    elif (
+        intent == "navigate"
+        and line == "not_specified"
+        and re.search(r"\b(?:dpr|drp)\b", message.lower())
+    ):
+        # "go to dpr" / "open dpr" — navigation requires a line.
+        return _clarify_dpr_line(response)
+
+    # A navigation-only turn is complete once navigateToDPR has run: answer
+    # the browser's chain round quietly instead of calling the model again
+    # (it would repeat the tool or say "all steps are done").
+    if intent == "navigate" and executed:
+        response["toolCalls"].append(
+            {
+                "tool": "navigateToDPR",
+                "args": {"line": line} if line != "not_specified" else {},
+                "status": "done",
+            }
+        )
+        return response
+
     try:
         choice = choose_tool(message, intent, entities, page, date, executed)
     except Exception as exc:  # noqa: BLE001 — never 500 the chat on model output
@@ -168,6 +257,10 @@ def run_chat(
 
     tool_name = choice["tool"]
     args = choice["args"]
+
+    # The DPR line comes from Laya's entities, never from the model's memory.
+    if tool_name == "navigateToDPR" and line != "not_specified":
+        args = {"line": line}
 
     # ── meta tools ────────────────────────────────────────────────────────
     if tool_name == "none":
@@ -198,7 +291,10 @@ def run_chat(
 
     # ── UI tool → browser executes (Step 5) ───────────────────────────────
     if tool["type"] == "ui":
-        response["reply"] = UI_REPLIES.get(tool_name, f"Running {tool_name}.")
+        reply = UI_REPLIES.get(tool_name, f"Running {tool_name}.")
+        if tool_name == "navigateToDPR" and args.get("line"):
+            reply = f"Opening the DPR {str(args['line']).upper()} page."
+        response["reply"] = reply
         response["toolCalls"].append({"tool": tool_name, "args": args, "status": "pending"})
         return response
 
