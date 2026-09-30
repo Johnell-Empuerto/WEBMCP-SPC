@@ -31,6 +31,7 @@ import NgTaggingPage from "@/features/ng-tagging/components/NgTaggingPage"
 import NgReportPage from "@/features/ng-report/components/NgReportPage"
 import DprMasterPage from "@/features/dpr-master/components/DprMasterPage"
 import LogsPage from "@/features/logs/components/LogsPage"
+import McpGuidePage from "@/pages/McpGuidePage"
 import type { ReactNode } from "react"
 
 function LoadingScreen() {
@@ -127,6 +128,7 @@ function AppRoutes() {
         <Route path="/ng-report" element={<NgReportPage />} />
         <Route path="/dpr-master" element={<DprMasterPage />} />
         <Route path="/logs" element={<LogsPage />} />
+        <Route path="/mcp-guide" element={<McpGuidePage />} />
         <Route path="/analysis/production" element={<ProductionCharts />} />
         <Route
           path="/users"
