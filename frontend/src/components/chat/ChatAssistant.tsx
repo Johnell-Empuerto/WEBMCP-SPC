@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bot, Send, Sparkles, X } from "lucide-react";
+import { Bot, Check, Send, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -39,7 +39,8 @@ interface ChatMessage {
  *                  OPEN after a UI action (success ✓ or failure ✗) until
  *                  the user closes it manually
  *   "executing"  → collapsed ONLY because /chat returned executable ui
- *                  toolCalls and the browser is running them right now
+ *                  toolCalls; the disabled ✨ FAB shows a live status pill
+ *                  (Loading… / Opening DPR… / … / ✓) driven by the executor
  *
  * executing → open is the only post-execution transition; nothing
  * auto-closes the panel.
@@ -55,8 +56,32 @@ function successMessage(executed: string[], navLine: string | null): string {
   return "✓ Done";
 }
 
+/**
+ * FAB pill labels while the browser executes — one per registry tool.
+ * The pill itself is 100% event-driven: it changes when the executor
+ * starts/finishes a real action, never on a fixed timer. The ONLY timer in
+ * this component is SUCCESS_FLASH_MS — a short confirmation beat for the ✓
+ * before the panel pops back open.
+ */
+const TOOL_ACTION_LABELS: Record<string, string> = {
+  navigateToDPR: "Opening DPR…",
+  setDPRFilters: "Applying filters…",
+  searchDPR: "Loading data…",
+};
+
+function actionLabel(tool: string): string {
+  return TOOL_ACTION_LABELS[tool] ?? "Working…";
+}
+
+const SUCCESS_FLASH_MS = 700;
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 export default function ChatAssistant() {
   const [mcpState, setMcpState] = useState<McpState>("closed");
+  // Live status text for the FAB pill while mcpState === "executing"
+  // (null when idle). Driven only by executor lifecycle events.
+  const [execLabel, setExecLabel] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -178,6 +203,7 @@ export default function ChatAssistant() {
         );
         if (hasUiTool && !collapsed) {
           setMcpState("executing");
+          setExecLabel("Loading…");
           collapsed = true;
         }
 
@@ -188,6 +214,9 @@ export default function ChatAssistant() {
             const l = tc.args?.line;
             navLine = typeof l === "string" && l ? l : "adc";
           }
+          // Pill follows the executor: label is set the moment THIS action
+          // starts and stays until the next lifecycle event.
+          setExecLabel(actionLabel(tc.tool));
           const result = await executeToolCall(tc.tool, tc.args);
           if (result.status === "done") {
             executed.push(tc.tool);
@@ -205,11 +234,20 @@ export default function ChatAssistant() {
         }
         appendSteps(roundSteps);
         if (!progressed) break;
+        // Between rounds the AI picks the next step (round trip to /chat).
+        setExecLabel("Working…");
       }
 
       if (collapsed) {
-        if (anyFailed) failUiAction(); // → open, stays open with the ✗
-        else completeUiAction(executed, navLine); // → open, stays with the ✓
+        if (anyFailed) {
+          failUiAction(); // → open, stays open with the ✗
+        } else {
+          // Confirmation beat on the pill (✓) before the panel pops back —
+          // the loader above was event-driven; this is not a loader.
+          setExecLabel(successMessage(executed, navLine));
+          await sleep(SUCCESS_FLASH_MS);
+          completeUiAction(executed, navLine); // → open, stays with the ✓
+        }
       }
     } catch (err) {
       pushBot(
@@ -219,6 +257,7 @@ export default function ChatAssistant() {
       );
       if (collapsed) failUiAction(); // reopen so the error is visible
     } finally {
+      setExecLabel(null);
       setBusy(false);
     }
   };
@@ -238,24 +277,49 @@ export default function ChatAssistant() {
 
   return (
     <>
-      {/* ═══ Floating action button — ONLY in "closed". Hidden during
-          "executing" so nothing can transition the panel from outside while
-          a UI action runs; afterwards it comes back to "open" and the user
-          closes it manually. */}
-      {mcpState === "closed" && (
-        <button
-          type="button"
-          onClick={openPanel}
-          aria-label="Open NXPERT EON MCP"
-          className={cn(
-            "fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full text-white",
-            "bg-gradient-to-br from-primary to-secondary shadow-lg transition-all duration-200",
-            "hover:scale-105 hover:shadow-xl active:scale-95",
-            "animate-in fade-in-0 duration-200",
+      {/* ═══ Floating MCP button + execution status pill ═══
+          "closed"   → clickable ✨ button
+          "executing"→ same button DISABLED (nothing may transition the
+                       panel from outside mid-action) with a live status
+                       pill driven by the executor: Loading… → Opening DPR…
+                       → Applying filters… → Loading data… → ✓ result.
+          "open"     → panel visible, nothing here. */}
+      {mcpState !== "open" && (
+        <div className="fixed bottom-6 right-6 z-50 flex flex-col items-center gap-2">
+          {mcpState === "executing" && execLabel && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-2 rounded-full border bg-background px-3 py-1.5 shadow-lg"
+            >
+              {execLabel.startsWith("✓") ? (
+                <Check className="h-3.5 w-3.5 text-emerald-600" />
+              ) : (
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+              )}
+              <span className="whitespace-nowrap text-xs font-medium">
+                {execLabel}
+              </span>
+            </div>
           )}
-        >
-          <Sparkles className="h-6 w-6" />
-        </button>
+          <button
+            type="button"
+            onClick={openPanel}
+            disabled={mcpState === "executing"}
+            aria-label="Open NXPERT EON MCP"
+            aria-busy={mcpState === "executing"}
+            className={cn(
+              "flex h-14 w-14 items-center justify-center rounded-full text-white",
+              "bg-gradient-to-br from-primary to-secondary shadow-lg transition-all duration-200",
+              "animate-in fade-in-0 duration-200",
+              mcpState === "executing"
+                ? "cursor-default opacity-80"
+                : "hover:scale-105 hover:shadow-xl active:scale-95",
+            )}
+          >
+            <Sparkles className="h-6 w-6" />
+          </button>
+        </div>
       )}
 
       {/* ═══ MCP panel (right side) — chat, conversation, Guide link ═══ */}
@@ -366,8 +430,9 @@ export default function ChatAssistant() {
             ),
           )}
 
-          {/* Thinking bubble — the visible "AI is processing" phase. The
-              panel stays open until /chat returns ui toolCalls. */}
+          {/* AI-processing phase (panel stays open): ● ● ● Working…
+              — distinct from the FAB pill below, which only shows during
+              browser/UI execution. */}
           {busy && (
             <div className="flex items-start gap-2.5">
               <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
@@ -378,6 +443,9 @@ export default function ChatAssistant() {
                   <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
                   <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:150ms]" />
                   <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:300ms]" />
+                  <span className="ml-1.5 text-xs text-muted-foreground">
+                    Working…
+                  </span>
                 </span>
               </div>
             </div>
