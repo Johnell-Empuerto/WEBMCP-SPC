@@ -7,24 +7,28 @@ Run:
 Endpoints (the contract the web UI expects):
     POST /predict   answer every question about one state
     POST /intent    NXPERT chat: typed intent + entities for a user message
+    POST /chat      orchestrator: intent + Qwen tool choice + reply/toolCalls
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import logging
 import os
 import re
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import laya
 from laya import Router
+
+from orchestrator import run_chat
 
 # The same per-request bounds laya.serve enforces, read from it so this shim cannot drift.
 import laya.serve as _laya_serve
@@ -66,6 +70,13 @@ INTENT_CRITERIA: Dict[str, str] = {
     "greeting": "greeting, thanks, or asking what you can do",
     "unknown": "request does not match any other intent",
 }
+
+MONTH_NAMES: Dict[str, int] = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+_MONTH_RE = "|".join(MONTH_NAMES)
 
 
 # --------------------------------------------------------------------------- #
@@ -170,19 +181,54 @@ def _extract_entities(message: str, current_date: Optional[str]) -> Dict[str, An
     """
     text = message.lower()
 
-    # Date
+    # Date — resolve to a concrete YYYY-MM-DD whenever the message implies
+    # one; otherwise keep the date the page is already showing.
+    date = current_date
+    try:
+        anchor = datetime.date.fromisoformat(str(current_date))
+    except (ValueError, TypeError):
+        anchor = datetime.date.today()
+
+    def _shift(days: int) -> str:
+        return (anchor + datetime.timedelta(days=days)).isoformat()
+
+    month_year = re.search(rf"\b({_MONTH_RE})\s+(\d{{4}})\b", text)
+    month_day = re.search(
+        rf"\b({_MONTH_RE})\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?\b", text
+    )
+    month_bare = re.search(rf"\b({_MONTH_RE})\b", text)
+    iso_match = re.search(r"\b(\d{4}-\d{1,2}-\d{1,2})\b", text)
+
     if re.search(r"\btoday\b", text):
         date_hint = "today"
     elif re.search(r"\byesterday\b", text):
-        date_hint = "yesterday"
+        date_hint, date = "yesterday", _shift(-1)
     elif re.search(r"\btomorrow\b", text):
-        date_hint = "tomorrow"
-    elif re.search(
-        r"\b\d{4}-\d{1,2}-\d{1,2}\b"
-        r"|\b(?:january|february|march|april|may|june|july|august|"
-        r"september|october|november|december)\s+\d{1,2}(?:,\s*\d{4})?\b",
-        text,
+        date_hint, date = "tomorrow", _shift(1)
+    elif month_year:
+        year = int(month_year.group(2))
+        date = f"{year}-{MONTH_NAMES[month_year.group(1)]:02d}-01"
+        date_hint = "explicit"
+    elif month_day:
+        name, dd = month_day.group(1), int(month_day.group(2))
+        yy = month_day.group(3)
+        year = int(yy) if yy else anchor.year
+        try:
+            date = datetime.date(year, MONTH_NAMES[name], dd).isoformat()
+        except ValueError:
+            date = f"{year}-{MONTH_NAMES[name]:02d}-01"
+        date_hint = "explicit"
+    elif month_bare and (
+        month_bare.group(1) != "may"
+        or re.search(r"\b(?:for|in|during)\s+may\b", text)
     ):
+        date = f"{anchor.year}-{MONTH_NAMES[month_bare.group(1)]:02d}-01"
+        date_hint = "explicit"
+    elif iso_match:
+        try:
+            date = datetime.date.fromisoformat(iso_match.group(1)).isoformat()
+        except ValueError:
+            date = iso_match.group(1)
         date_hint = "explicit"
     else:
         date_hint = "not_specified"
@@ -207,11 +253,25 @@ def _extract_entities(message: str, current_date: Optional[str]) -> Dict[str, An
     else:
         shift = "not_specified"
 
+    # Model / product code ("model 500", "model ES01", "model: 8-98247-187-2")
+    # Captured with original case; the frontend resolves name/part-code.
+    # \b after "model" keeps "models" from yielding the stray "s" match.
+    model_match = re.search(
+        r"\bmodel\b\s*[:#=]?\s*([A-Za-z0-9][A-Za-z0-9\-]{0,19})", message, re.IGNORECASE
+    )
+    if model_match:
+        model = model_match.group(1)
+    elif re.search(r"\b(?:all|every|everything)\b", text):
+        model = "all"
+    else:
+        model = "not_specified"
+
     return {
         "date_hint": date_hint,
-        "date": current_date,
+        "date": date,
         "line": line,
         "shift": shift,
+        "model": model,
     }
 
 
@@ -225,7 +285,7 @@ def _correct_intent(message: str, predicted: str) -> str:
     text = message.lower()
 
     # DPR search/filter/load takes priority over simple navigation.
-    if "dpr" in text:
+    if "dpr" in text or "drp" in text:
         if any(word in text for word in (
             "set",
             "filter",
@@ -235,6 +295,7 @@ def _correct_intent(message: str, predicted: str) -> str:
             "date",
             "line",
             "shift",
+            "data",
         )):
             return "dpr_search"
 
@@ -249,6 +310,29 @@ def _correct_intent(message: str, predicted: str) -> str:
             "ng defects",
         )):
             return "ng_summary"
+
+    # Data-loading phrasing without the letters "dpr" ("Show April for all
+    # models") is still a DPR search — but never hijack plan/user/NG intents.
+    if (
+        re.search(r"\b(?:show|load|display|get|fetch|pull|see|want|view)\b", text)
+        and re.search(rf"\b(?:{_MONTH_RE}|today|yesterday|tomorrow)\b|\d{{4}}-\d{{1,2}}-\d{{1,2}}", text)
+        and re.search(r"\b(?:model|models|everything)\b", text)
+        and not re.search(r"\b(?:ng|ppm|plan|user)\b", text)
+    ):
+        return "dpr_search"
+
+    # Pure page navigation: opening verbs + a known page keyword, with no
+    # data action (the dpr_search rules above already claimed those).
+    if re.search(r"\b(?:open|show|go\s+to|goto|take\s+me\s+to|navigate\s+to|display)\b", text):
+        if re.search(r"\b(?:dpr|drp|mpr|dashboard|calendar|logs|settings|ng\s+report|plan\s+uploader)\b", text):
+            # Stay on data intents ("show dpr plan"), but the page names
+            # "ng report" / "plan uploader" are navigation despite the words.
+            if not re.search(
+                r"\b(?:plan(?!\s+uploader)|actual|production|quantity|output"
+                r"|units?|ng(?!\s+report)|ppm)\b",
+                text,
+            ):
+                return "navigate"
 
     return predicted
 
@@ -377,15 +461,9 @@ def _confidence(answer: Dict[str, Any]) -> Optional[float]:
         return None
 
 
-@app.post("/intent")
-def intent(req: IntentRequest) -> Dict[str, Any]:
-    """NXPERT chat entry point: user message + page state → typed intent/entities.
-
-    Laya answers the intent question in one forward pass; simple entities
-    (date/line/shift) are extracted deterministically by Python. The caller
-    (orchestrator) feeds `intent` + `entities` to Qwen for tool selection.
-    """
-    state = req.state
+def _classify(state: IntentState) -> Dict[str, Any]:
+    """Laya intent + deterministic entities for one message (shared by
+    /intent and /chat)."""
     # Laya reads plain text best; page/filters are context for the response,
     # not tokens it must parse, so only the message becomes the state text.
     try:
@@ -401,24 +479,56 @@ def intent(req: IntentRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="prediction failed")
 
     intent_answer = result.get("answers", {}).get("intent", {})
-
     predicted_intent = _choice(intent_answer, "unknown")
-
-    final_intent = _correct_intent(
-        state.message,
-        predicted_intent,
-    )
+    final_intent = _correct_intent(state.message, predicted_intent)
 
     return {
         "intent": final_intent,
         "entities": _extract_entities(state.message, state.date),
         "confidence": _confidence(intent_answer),
-        "state": {
-            "page": state.page,
-            "filters": state.filters,
-        },
+        "state": {"page": state.page, "filters": state.filters},
         "routing": result.get("routing", {}),
     }
+
+
+@app.post("/intent")
+def intent(req: IntentRequest) -> Dict[str, Any]:
+    """NXPERT chat entry point: user message + page state → typed intent/entities.
+
+    Laya answers the intent question in one forward pass; simple entities
+    (date/line/shift) are extracted deterministically by Python. The caller
+    (orchestrator) feeds `intent` + `entities` to Qwen for tool selection.
+    """
+    return _classify(req.state)
+
+
+class ChatRequest(BaseModel):
+    """Full chat turn: classification context + already-executed UI steps."""
+    state: IntentState
+    executed: List[str] = Field(default_factory=list)
+
+
+@app.post("/chat")
+def chat(req: ChatRequest, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Step-4 orchestrator: Laya → Qwen → tool routing → reply + toolCalls.
+
+    `executed` lists UI tools the browser already ran this turn (chaining:
+    navigateToDPR → setDPRFilters → searchDPR). The Authorization header is
+    forwarded to Express for `read` tools so the AI runs under the logged-in
+    user's permissions.
+    """
+    classified = _classify(req.state)
+    return run_chat(
+        message=req.state.message,
+        intent=classified["intent"],
+        entities=classified["entities"],
+        confidence=classified["confidence"],
+        routing=classified["routing"],
+        page=req.state.page,
+        date=req.state.date,
+        executed=req.executed,
+        jwt=authorization,
+    )
 
 
 @app.exception_handler(404)
@@ -428,7 +538,7 @@ async def _not_found(request: Request, exc: Exception):
     return JSONResponse(
         status_code=404,
         content={"detail": "not found",
-                "routes": ["/predict", "/intent", "/qtypes", "/models", "/health"]},
+                "routes": ["/predict", "/intent", "/chat", "/qtypes", "/models", "/health"]},
     )
 
 

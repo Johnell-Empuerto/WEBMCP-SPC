@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Bot,
   Send,
@@ -10,6 +11,13 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useChatContext } from "@/webmcp/context";
+import { fetchChat } from "@/webmcp/chat";
+import {
+  executeToolCall,
+  registerToolHandler,
+  unregisterToolHandler,
+} from "@/webmcp/executor";
 
 interface ChatMessage {
   id: number;
@@ -36,16 +44,67 @@ export default function ChatAssistant() {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
   const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const navigate = useNavigate();
+  const ctx = useChatContext();
+
+  // App-level WebMCP controller: navigateToDPR (line adc|c4|kd → /mpr-*,
+  // the pages the sidebar shows as "DPR (ADC)"/"DPR (C4)").
+  // DPR-owned tools (setDPRFilters, searchDPR) register from the MPR page.
+  useEffect(() => {
+    registerToolHandler("navigateToDPR", (args) => {
+      const line = typeof args.line === "string" && args.line ? args.line : "adc";
+      navigate(`/mpr-${line}`);
+    });
+    return () => unregisterToolHandler("navigateToDPR");
+  }, [navigate]);
+
+  const pushBot = (text: string) =>
+    setMessages((prev) => [...prev, { id: Date.now() + Math.random(), from: "bot", text }]);
+
+  const send = async (text: string) => {
+    if (busy) return;
+    setMessages((prev) => [
+      ...prev,
+      { id: Date.now(), from: "user", text },
+    ]);
+    setBusy(true);
+    try {
+      // Chain: /chat → run pending ui tools → /chat with executed=[...] …
+      // (orchestrator caps the chain at 3 steps server-side).
+      const executed: string[] = [];
+      for (let round = 0; round < 3; round++) {
+        const res = await fetchChat(text, ctx, executed);
+        if (res.reply) pushBot(res.reply);
+
+        const pending = res.toolCalls.filter((t) => t.status === "pending");
+        if (pending.length === 0) break;
+
+        let progressed = false;
+        for (const tc of pending) {
+          const result = await executeToolCall(tc.tool, tc.args);
+          if (result.status === "done") {
+            executed.push(tc.tool);
+            progressed = true;
+          } else {
+            pushBot(`Could not run ${tc.tool}: ${result.error}`);
+          }
+        }
+        if (!progressed) break;
+      }
+    } catch (err) {
+      pushBot(err instanceof Error ? err.message : "Something went wrong talking to the assistant.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
-    // UI only — no backend call yet.
-    setMessages((prev) => [
-      ...prev,
-      { id: Date.now(), from: "user", text: input.trim() },
-    ]);
+    const text = input.trim();
     setInput("");
+    void send(text);
   };
 
   return (
@@ -142,7 +201,9 @@ export default function ChatAssistant() {
               <button
                 key={q}
                 type="button"
-                className="rounded-full border border-primary/30 bg-accent px-3 py-1.5 text-xs font-medium text-accent-foreground transition-colors hover:bg-primary hover:text-primary-foreground"
+                disabled={busy}
+                onClick={() => void send(q)}
+                className="rounded-full border border-primary/30 bg-accent px-3 py-1.5 text-xs font-medium text-accent-foreground transition-colors hover:bg-primary hover:text-primary-foreground disabled:opacity-50"
               >
                 {q}
               </button>
@@ -164,13 +225,13 @@ export default function ChatAssistant() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask about production, DPR, MPR…"
+              placeholder={busy ? "Working…" : "Ask about production, DPR, MPR…"}
               className="h-10 flex-1 rounded-lg border border-input bg-muted/40 px-3.5 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/50 focus:bg-background"
             />
             <Button
               type="submit"
               size="icon"
-              disabled={!input.trim()}
+              disabled={!input.trim() || busy}
               aria-label="Send message"
               className="h-10 w-10 rounded-full bg-gradient-to-br from-primary to-secondary hover:opacity-90"
             >

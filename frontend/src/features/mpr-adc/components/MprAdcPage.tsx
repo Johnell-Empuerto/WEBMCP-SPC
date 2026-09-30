@@ -22,6 +22,8 @@ import {
 import { fetchMprAdcData, fetchMprAdcNgData } from "../api";
 import type { MprAdcNgRow, MprAdcRow, MprNgDetailRow } from "../types";
 import { MACHINES, MODELS } from "../types";
+import { registerToolHandler, unregisterToolHandler } from "@/webmcp/executor";
+import { resolveModel } from "@/webmcp/models";
 import { buildMprAggregates, buildNgDetailRows } from "../lib/aggregate";
 import { exportMprToExcel } from "../lib/exportExcel";
 import MprChart from "./MprChart";
@@ -102,6 +104,31 @@ export default function MprAdcPage() {
     setAppliedModel(filterModel);
     doFetch(filterMonth, filterMachine, filterModel);
   }, [filterMonth, filterMachine, filterModel, doFetch]);
+
+  // ── WebMCP controllers (Step 5b) — driven by the chat assistant ─────────
+  // setDPRFilters patches the TEMP filters (page still needs Load); searchDPR
+  // runs the existing handleLoad(). Unknown model → thrown error, so the
+  // chain stops BEFORE any query is sent with the wrong model.
+  useEffect(() => {
+    registerToolHandler("setDPRFilters", (args) => {
+      if (typeof args.model === "string" && args.model.trim()) {
+        const res = resolveModel(args.model, MODELS);
+        if ("error" in res) throw new Error(res.error);
+        setFilterModel(res.value);
+      }
+      if (typeof args.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(args.date)) {
+        setFilterMonth(args.date.slice(0, 7));
+      }
+      // shift / partName / dieNo are not filters on this page — ignored.
+    });
+    registerToolHandler("searchDPR", () => {
+      handleLoad();
+    });
+    return () => {
+      unregisterToolHandler("setDPRFilters");
+      unregisterToolHandler("searchDPR");
+    };
+  }, [handleLoad]);
 
   // Reset restores the legacy defaults (current month, all machines, all models)
   const handleReset = useCallback(() => {

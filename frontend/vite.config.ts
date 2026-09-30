@@ -33,11 +33,12 @@ export default defineConfig({
         changeOrigin: true,
       },
 
-      // FastAPI
+      // FastAPI (Laya) — strip the /laya-api prefix: /laya-api/chat -> /chat
 
       "/laya-api": {
         target: "http://localhost:9000",
         changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/laya-api/, ""),
       },
     },
   },

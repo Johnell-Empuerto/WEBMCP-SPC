@@ -7,7 +7,7 @@ Adding a tool = update BOTH files, then Laya intent, then executor.
 
 from typing import Any, Dict, List
 
-TOOLS: List[Dict[str, str]] = [
+TOOLS: List[Dict[str, Any]] = [
     {
         "name": "navigateToDPR",
         "type": "ui",
@@ -31,18 +31,26 @@ TOOLS: List[Dict[str, str]] = [
         "type": "read",
         "description": "Fetch DPR production actuals for a date",
         "args": "date(YYYY-MM-DD), model?",
+        "endpoint": {"method": "POST", "path": "/api/dpr-adc/data"},
     },
     {
         "name": "getDPRSummary",
         "type": "read",
         "description": "Aggregated DPR totals for a date",
         "args": "date(YYYY-MM-DD)",
+        "endpoint": {"method": "POST", "path": "/api/dpr-adc/summary"},
     },
     {
         "name": "getNGSummary",
         "type": "read",
         "description": "NG defect totals by model for a date",
-        "args": "date(YYYY-MM-DD), process?",
+        "args": "date(YYYY-MM-DD)",
+        "endpoint": {
+            "method": "GET",
+            "path": "/api/analysis/ng-summary",
+            # API wants startDate/endDate; both come from the tool's `date`.
+            "map": {"startDate": "date", "endDate": "date"},
+        },
     },
 ]
 
@@ -85,4 +93,19 @@ def validate_choice(payload: Dict[str, Any]) -> Dict[str, Any]:
         args = {}
     if not isinstance(args, dict):
         raise ValueError("'args' must be an object")
-    return {"tool": tool, "args": args}
+    # Cleanup: Qwen sometimes writes literal "model?" keys and fills optional
+    # args with "none"/"not_specified". Drop those so the executor only
+    # receives real values: {"date": "..."} not {"model?": "none"}.
+    cleaned: Dict[str, Any] = {}
+    for key, value in args.items():
+        key = key.rstrip("?").strip()
+        if not key:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if value.strip().lower() in {"none", "not_specified", "unknown", ""}:
+                continue
+            value = value.strip()
+        cleaned[key] = value
+    return {"tool": tool, "args": cleaned}

@@ -23,6 +23,8 @@ export interface IntentEntities {
   date: string | null;
   line: "adc" | "c4" | "kd" | "not_specified";
   shift: "1" | "2" | "3" | "not_specified";
+  /** Product/model code from the message ("model 500" -> "500"). */
+  model: string;
 }
 
 export interface IntentResult {
