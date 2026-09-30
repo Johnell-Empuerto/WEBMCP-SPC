@@ -26,8 +26,17 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      // expressjs API
+
       "/api": {
         target: "http://localhost:3002",
+        changeOrigin: true,
+      },
+
+      // FastAPI
+
+      "/laya-api": {
+        target: "http://localhost:9000",
         changeOrigin: true,
       },
     },
