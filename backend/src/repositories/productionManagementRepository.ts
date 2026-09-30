@@ -73,20 +73,28 @@ function buildMachineFilter(machine: string): { planFilter: string; joinFilter: 
   };
 }
 
-// The SARGable date-range predicates for the actual-data source (replaces
-// CONVERT(DATE, ...) BETWEEN which prevented index usage). The ADC branch
-// filters on the header datetime directly; the KD/C4 branches use the detail
-// input date with the legacy 05:30 shift-boundary offset so the computed
-// production date lands in the same month.
-function buildRanges(firstDay: string, nextMonthStart: string): {
+// The SARGable date-range predicates pushed INTO each branch of the actual
+// data source so SQL Server seeks instead of scanning every travelog row.
+// Replaces CONVERT(DATE, ...) BETWEEN which prevented index usage.
+// Semantics match the outer WHERE exactly:
+//   ADC  — production date IS the header date (no shift adjustment):
+//          header datetime in [startDate, nextDate)
+//   KD/C4 — production date = detail input date shifted back at the 05:30
+//          boundary, so input datetime in [startKD, nextKD)
+// All four params (@startDate/@nextDate/@startKD/@nextKD) are bound by every
+// caller of these queries.
+function buildRanges(): {
   adcRange: string;
   kdRange: string;
   c4Range: string;
 } {
   return {
-    adcRange: '',
-    kdRange: '',
-    c4Range: '',
+    adcRange:
+      ' AND h.Pth_ReqInputDate >= @startDate AND h.Pth_ReqInputDate < @nextDate',
+    kdRange:
+      ' AND d.Ptd_InputActualDate >= @startKD AND d.Ptd_InputActualDate < @nextKD',
+    c4Range:
+      ' AND c4.Ptd_InputActualDate >= @startKD AND c4.Ptd_InputActualDate < @nextKD',
   };
 }
 
@@ -102,7 +110,7 @@ export async function getCalendarEvents(filters: PmQueryFilters): Promise<any[]>
 
   const lineFilter = buildLineFilter(line);
   const machineFilters = buildMachineFilter(machine);
-  const { adcRange, kdRange, c4Range } = buildRanges(firstDay, nextMonthStart);
+  const { adcRange, kdRange, c4Range } = buildRanges();
 
   const query = `
 WITH PlanData AS (
@@ -224,7 +232,7 @@ export async function getProductDetails(filters: PmQueryFilters): Promise<any[]>
 
   const lineFilter = buildLineFilter(line);
   const machineFilters = buildMachineFilter(machine);
-  const { adcRange, kdRange, c4Range } = buildRanges(firstDay, nextMonthStart);
+  const { adcRange, kdRange, c4Range } = buildRanges();
 
   const query = `
 SELECT
@@ -311,7 +319,7 @@ export async function getMonthlySummary(filters: PmQueryFilters): Promise<any[]>
 
   const lineFilter = buildLineFilter(line);
   const machineFilters = buildMachineFilter(machine);
-  const { adcRange, kdRange, c4Range } = buildRanges(yearStart, nextYearStart);
+  const { adcRange, kdRange, c4Range } = buildRanges();
 
   const query = `
 WITH PlanData AS (
@@ -390,7 +398,7 @@ export async function getDailyDetails(filters: PmQueryFilters): Promise<any[]> {
   }
 
   // SARGable single-day range (same day semantics as CONVERT(DATE, ...) = @queryDate).
-  const { adcRange, kdRange, c4Range } = buildRanges(date, nextDayDate);
+  const { adcRange, kdRange, c4Range } = buildRanges();
 
   const query = `
 WITH PlanData AS (
